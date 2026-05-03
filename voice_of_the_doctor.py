@@ -3,6 +3,7 @@ import platform
 import tempfile
 import winsound
 
+from deepgram import DeepgramClient
 from elevenlabs import save
 from elevenlabs.client import ElevenLabs
 from gtts import gTTS
@@ -59,5 +60,21 @@ def text_to_speech_with_elevenlabs(input_text, output_filepath):
         model="eleven_turbo_v2"
     )
     save(audio, output_filepath)
+    if _server_playback_enabled():
+        play_audio(output_filepath)
+
+
+def text_to_speech_with_deepgram(input_text, output_filepath):
+    ensure_folder_exists(output_filepath)
+    model = (
+        os.environ.get("AI_DOCTOR_DEEPGRAM_TTS_MODEL") or "aura-2-thalia-en"
+    ).strip() or "aura-2-thalia-en"
+    client = DeepgramClient()
+    audio_iter = client.speak.v1.audio.generate(text=input_text, model=model)
+    body = b"".join(audio_iter)
+    if not body:
+        raise RuntimeError("Deepgram TTS returned empty audio")
+    with open(output_filepath, "wb") as audio_file:
+        audio_file.write(body)
     if _server_playback_enabled():
         play_audio(output_filepath)

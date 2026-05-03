@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from pathlib import Path
 
 import gradio as gr
@@ -10,7 +11,12 @@ from dotenv import load_dotenv
 
 from brain_of_the_doctor import analyze_image_with_query, encode_image
 from breast_cancer_classifer import breast_cancer_detection_model
-from voice_of_the_doctor import text_to_speech_with_elevenlabs, text_to_speech_with_gtts
+from voice_of_the_doctor import (
+    text_to_speech_with_deepgram,
+    text_to_speech_with_elevenlabs,
+    text_to_speech_with_gtts,
+)
+from voice_of_the_patient import transcribe_with_deepgram
 
 load_dotenv()
 
@@ -26,7 +32,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 MODEL_ID = (os.environ.get("AI_DOCTOR_GROQ_MODEL") or _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
 
-_NO_INPUT_HINT = "Please provide at least an image or a short description to begin diagnosis."
+_NO_INPUT_HINT = "Please provide at least an image, a short description, or record voice to capture a transcript before analyzing."
 
 system_prompt = """You have to act as a professional doctor, i know you are not but this is for learning purpose.
 What's in this image?. Do you find anything wrong with it medically?
@@ -49,9 +55,9 @@ def is_hsi_image(image_path: str | None) -> bool:
 
 def _tts_backend():
     raw = os.environ.get("AI_DOCTOR_TTS", "gtts").strip().lower()
-    if raw not in {"elevenlabs", "gtts"}:
-        return "gtts"
-    return raw
+    if raw in {"elevenlabs", "gtts", "deepgram"}:
+        return raw
+    return "gtts"
 
 
 def _tts_enabled() -> bool:
@@ -63,28 +69,33 @@ def _synthesize_voice(diagnosis: str, audio_output_path: str) -> None:
     backend = _tts_backend()
     if backend == "gtts":
         text_to_speech_with_gtts(diagnosis, audio_output_path)
-    else:
+    elif backend == "elevenlabs":
         text_to_speech_with_elevenlabs(diagnosis, audio_output_path)
+    else:
+        text_to_speech_with_deepgram(diagnosis, audio_output_path)
 
 
-def _ensure_demo_example_image() -> Path | None:
-    ex_dir = Path(__file__).resolve().parent / "examples"
-    ex_dir.mkdir(parents=True, exist_ok=True)
-    p = ex_dir / "demo_placeholder.png"
+def transcribe_recorded_audio(audio_path, current_transcript):
+    """One-shot mic transcription after recording stops."""
+    current_transcript = (current_transcript or "").strip()
+    if not os.environ.get("DEEPGRAM_API_KEY"):
+        return "[STT unavailable: set DEEPGRAM_API_KEY in .env]"
+
+    if not audio_path:
+        return current_transcript
+
     try:
-        if not p.exists():
-            from PIL import Image
-            Image.new("RGB", (256, 256), color=(240, 250, 248)).save(p)
-        return p
+        text = transcribe_with_deepgram(audio_path)
+        return (text or current_transcript).strip()
     except Exception:
-        return None
+        logger.exception("Recorded transcription failed")
+        return current_transcript
 
 
-def process_inputs(description, image_pil, progress: gr.Progress = gr.Progress()):
-    context_text = (description or "").strip()
+def process_inputs(live_transcript, description, image_pil, progress: gr.Progress = gr.Progress()):
     diagnosis = ""
     route_mode = "—"
-    audio_output_path = "static/final.mp3"
+    audio_output_path: str | None = None
 
     try:
         logger.info("Consult: handler started (analyze click received).")
@@ -92,65 +103,71 @@ def process_inputs(description, image_pil, progress: gr.Progress = gr.Progress()
 
         progress(0.05, desc="Preparing…")
 
-        image_filepath = None
-        encoded_image = None
-        if image_pil is not None:
-            progress(0.3, desc="Saving image…")
-            image_filepath = "static/temp_image.png"
-            image_pil.save(image_filepath)
-            encoded_image = encode_image(image_filepath)
+        speech_text = (live_transcript or "").strip()
+        desc = (description or "").strip()
+        context_text = " ".join(p for p in (speech_text, desc) if p)
 
-        wants_classifier = contains_hsi_keywords(context_text) or (
-            image_filepath and is_hsi_image(image_filepath)
-        )
+        if not diagnosis:
+            image_filepath = None
+            encoded_image = None
+            if image_pil is not None:
+                progress(0.3, desc="Saving image…")
+                image_filepath = "static/temp_image.png"
+                image_pil.save(image_filepath)
+                encoded_image = encode_image(image_filepath)
 
-        if wants_classifier:
-            if not image_filepath:
-                route_mode = "Tissue classifier (demo) — image required"
-                diagnosis = (
-                    "For the tissue specialist model in this demo, please upload an image "
-                    "(PNG or JPG). Raw hyperspectral formats like .mat, .npy, or .hdr can be "
-                    "used when provided as files the app can load."
+            wants_classifier = contains_hsi_keywords(context_text) or (
+                image_filepath and is_hsi_image(image_filepath)
+            )
+
+            if wants_classifier:
+                if not image_filepath:
+                    route_mode = "Tissue classifier (demo) — image required"
+                    diagnosis = (
+                        "For the tissue specialist model in this demo, please upload an image "
+                        "(PNG or JPG). Raw hyperspectral formats like .mat, .npy, or .hdr can be "
+                        "used when provided as files the app can load."
+                    )
+                else:
+                    progress(0.45, desc="Running tissue classifier…")
+                    route_mode = "Tissue classifier (demo)"
+                    diagnosis = breast_cancer_detection_model(image_filepath)
+
+            elif encoded_image and context_text:
+                progress(0.5, desc="Vision + language model…")
+                route_mode = "Vision + language model (Groq)"
+                diagnosis = analyze_image_with_query(
+                    query=system_prompt + " " + context_text,
+                    encoded_image=encoded_image,
+                    model=MODEL_ID,
+                    image_media_type="image/png",
+                )
+            elif encoded_image:
+                progress(0.5, desc="Vision + language model…")
+                route_mode = "Vision + language model (Groq)"
+                diagnosis = analyze_image_with_query(
+                    query=system_prompt,
+                    encoded_image=encoded_image,
+                    model=MODEL_ID,
+                    image_media_type="image/png",
+                )
+            elif context_text:
+                progress(0.5, desc="Language model…")
+                route_mode = "Language model — text only (Groq)"
+                diagnosis = analyze_image_with_query(
+                    query=system_prompt + " " + context_text,
+                    encoded_image=None,
+                    model=MODEL_ID,
                 )
             else:
-                progress(0.45, desc="Running tissue classifier…")
-                route_mode = "Tissue classifier (demo)"
-                diagnosis = breast_cancer_detection_model(image_filepath)
-
-        elif encoded_image and context_text:
-            progress(0.5, desc="Vision + language model…")
-            route_mode = "Vision + language model (Groq)"
-            diagnosis = analyze_image_with_query(
-                query=system_prompt + " " + context_text,
-                encoded_image=encoded_image,
-                model=MODEL_ID,
-                image_media_type="image/png",
-            )
-        elif encoded_image:
-            progress(0.5, desc="Vision + language model…")
-            route_mode = "Vision + language model (Groq)"
-            diagnosis = analyze_image_with_query(
-                query=system_prompt,
-                encoded_image=encoded_image,
-                model=MODEL_ID,
-                image_media_type="image/png",
-            )
-        elif context_text:
-            progress(0.5, desc="Language model…")
-            route_mode = "Language model — text only (Groq)"
-            diagnosis = analyze_image_with_query(
-                query=system_prompt + " " + context_text,
-                encoded_image=None,
-                model=MODEL_ID,
-            )
-        else:
-            route_mode = "—"
-            diagnosis = _NO_INPUT_HINT
+                route_mode = "—"
+                diagnosis = _NO_INPUT_HINT
 
         logger.info("Consult: pipeline done route=%r response_chars=%s", route_mode, len(diagnosis) if diagnosis else 0)
 
-        if _tts_enabled() and diagnosis and diagnosis != _NO_INPUT_HINT:
+        if _tts_enabled() and diagnosis and diagnosis != _NO_INPUT_HINT and route_mode != "Error":
             progress(0.75, desc="Generating voice…")
+            audio_output_path = str(Path("static") / f"tts_{uuid.uuid4().hex}.mp3")
             try:
                 _synthesize_voice(diagnosis, audio_output_path)
             except Exception as tts_err:
@@ -164,7 +181,7 @@ def process_inputs(description, image_pil, progress: gr.Progress = gr.Progress()
         diagnosis = f"{type(e).__name__}: {e}"
         route_mode = "Error"
 
-    audio_path = audio_output_path if os.path.exists(audio_output_path) else None
+    audio_path = audio_output_path if (audio_output_path and os.path.exists(audio_output_path)) else None
     download_val = audio_path if audio_path else None
 
     return diagnosis, audio_path, download_val, route_mode
@@ -172,8 +189,10 @@ def process_inputs(description, image_pil, progress: gr.Progress = gr.Progress()
 
 def clear_all():
     return (
-        gr.update(value=""),
         None,
+        gr.update(value=""),
+        gr.update(value=None),
+        gr.update(value=""),
         gr.update(value=""),
         gr.update(value=None),
         gr.update(value=None),
@@ -727,11 +746,6 @@ def _app_theme() -> gr.themes.Base:
 
 
 def create_interface():
-    demo_img = _ensure_demo_example_image()
-    sample_rows = []
-    if demo_img is not None:
-        sample_rows.append(["", str(demo_img)])
-
     with gr.Blocks(
         theme=_app_theme(),
         css=APP_CSS,
@@ -785,6 +799,17 @@ def create_interface():
                     show_label=True,
                 )
 
+                gr.HTML("<div style='height:10px'></div>")
+
+                audio_input = gr.Audio(
+                    sources=["microphone"],
+                    type="filepath",
+                    format="wav",
+                    recording=False,
+                    label="Microphone — click Record, then Stop to transcribe",
+                    show_label=True,
+                )
+
                 gr.HTML("<div style='height:14px'></div>")
 
                 with gr.Row():
@@ -800,6 +825,13 @@ def create_interface():
                     )
 
             with gr.Column(scale=1, min_width=320):
+                transcript_output = gr.Textbox(
+                    label="Voice transcript",
+                    lines=4,
+                    interactive=True,
+                    placeholder="Record with the mic and stop when done; transcript appears here (editable).",
+                )
+
                 diagnosis_output = gr.Textbox(
                     label="Doctor's response",
                     lines=6,
@@ -818,6 +850,12 @@ def create_interface():
                     interactive=False,
                 )
 
+        audio_input.stop_recording(
+            transcribe_recorded_audio,
+            inputs=[audio_input, transcript_output],
+            outputs=[transcript_output],
+        )
+
         gr.HTML("<div style='height:8px'></div>")
         with gr.Accordion("ℹ  How this demo works", open=False):
             gr.Markdown("""
@@ -827,28 +865,22 @@ def create_interface():
 Upload a PNG or JPG scan or photo. Pixels are encoded and sent to the vision-language model.
 
 **Step 2 — Description (optional)**  
-Type a short note with symptoms, context, or what you want assessed. It is combined with the image when both are present.
+Type a short note with symptoms, context, or what you want assessed.
 
-**Step 3 — Routing**  
-Certain keywords (*hyperspectral, tissue, hsi*) in your text route the request to a local Keras tissue classifier instead of the LLM.
+**Step 3 — Voice transcript (optional)**  
+Record with the microphone and stop when done. The app sends one audio file to **Deepgram** and fills the transcript box. Requires `DEEPGRAM_API_KEY`. You can edit the transcript before **Analyze**.
 
-**Step 4 — Voice synthesis**  
-The written response is synthesized to MP3 via gTTS or ElevenLabs for playback and download.
+**Step 4 — Routing**  
+Certain keywords (*hyperspectral, tissue, hsi*) route the request to a local Keras tissue classifier instead of the LLM.
+
+**Step 5 — Spoken response**  
+The doctor reply is turned into MP3 using your `AI_DOCTOR_TTS` setting (`gtts`, `elevenlabs`, or `deepgram`; Deepgram TTS uses `DEEPGRAM_API_KEY` and `AI_DOCTOR_DEEPGRAM_TTS_MODEL` if set). Vision and language models still use Groq where configured (`GROQ_API_KEY`).
 """)
-
-        if sample_rows:
-            gr.HTML("<div style='height:4px'></div>")
-            gr.Examples(
-                examples=sample_rows,
-                inputs=[description_input, image_input],
-                label="Try a sample image",
-                cache_examples=False,
-            )
 
         # ── Wire up events ────────────────────────────────────────────────────
         analyze_btn.click(
             fn=process_inputs,
-            inputs=[description_input, image_input],
+            inputs=[transcript_output, description_input, image_input],
             outputs=[diagnosis_output, audio_output, download_file, mode_badge],
         )
 
@@ -856,8 +888,10 @@ The written response is synthesized to MP3 via gTTS or ElevenLabs for playback a
             fn=clear_all,
             inputs=[],
             outputs=[
-                description_input,
                 image_input,
+                description_input,
+                audio_input,
+                transcript_output,
                 diagnosis_output,
                 audio_output,
                 download_file,
