@@ -293,6 +293,7 @@ body::before {
     50%       { opacity: 0.5; transform: scale(0.7); }
 }
 
+.gradio-container .hero-wrap h1,
 .hero-wrap h1 {
     font-family: var(--font-display) !important;
     font-size: clamp(2.4rem, 6vw, 3.6rem);
@@ -300,10 +301,12 @@ body::before {
     letter-spacing: -0.03em;
     line-height: 1.05;
     margin: 0 0 0.9rem;
-    background: linear-gradient(135deg, #e2eaf6 0%, var(--c-teal) 50%, var(--c-blue) 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
+    color: #ffffff !important;
+    -webkit-text-fill-color: #ffffff !important;
+    background: none !important;
+    background-clip: border-box !important;
+    -webkit-background-clip: border-box !important;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
 }
 
 .hero-sub {
