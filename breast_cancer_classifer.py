@@ -8,23 +8,49 @@ from tensorflow.keras.preprocessing.image import img_to_array, load_img
 
 load_dotenv()
 
-MODEL_URL = os.getenv("MODEL_URL")
+MODEL_URL = (os.getenv("MODEL_URL") or "").strip()
 MODEL_PATH = "models/best_model.h5"
+
+_MODEL_UNAVAILABLE_MSG = (
+    "Tissue classifier is not configured. Set MODEL_URL in .env for automatic download "
+    'or place the weights file at "models/best_model.h5", then restart the app.'
+)
+
+
+def _url_is_http(url: str) -> bool:
+    return url.startswith("http://") or url.startswith("https://")
+
 
 # Download the model only if not already present
 def download_model():
-    if not os.path.exists(MODEL_PATH):
-        os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
-        print("📥 Downloading model...")
-        response = requests.get(MODEL_URL)
-        with open(MODEL_PATH, "wb") as f:
-            f.write(response.content)
-        print("✅ Model downloaded.")
-    else:
-        print("✅ Model already exists.")
+    if os.path.exists(MODEL_PATH):
+        print("Classifier model already present.")
+        return
+
+    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+
+    if not MODEL_URL:
+        print("MODEL_URL not set; skipping classifier model download.")
+        return
+
+    if not _url_is_http(MODEL_URL):
+        print("MODEL_URL must start with http:// or https://; got invalid value.")
+        return
+
+    print("Downloading classifier model...")
+    response = requests.get(MODEL_URL, timeout=120)
+    response.raise_for_status()
+    with open(MODEL_PATH, "wb") as f:
+        f.write(response.content)
+    print("Model downloaded.")
+
 
 download_model()
-model = load_model(MODEL_PATH, compile=False)
+
+if os.path.exists(MODEL_PATH):
+    model = load_model(MODEL_PATH, compile=False)
+else:
+    model = None
 
 # Class mappings
 class_descriptions = {
@@ -47,7 +73,11 @@ class_descriptions = {
 
 class_labels = {0: 'benign', 1: 'malignant', 2: 'normal'}
 
+
 def breast_cancer_detection_model(image_path):
+    if model is None:
+        return _MODEL_UNAVAILABLE_MSG
+
     try:
         img = load_img(image_path, target_size=(256, 256))
         img_array = img_to_array(img)
@@ -61,4 +91,4 @@ def breast_cancer_detection_model(image_path):
         return result
 
     except Exception as e:
-        return f"❌ Error processing the image: {str(e)}"
+        return f"Error processing the image: {str(e)}"

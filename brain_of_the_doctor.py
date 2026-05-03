@@ -8,9 +8,9 @@ import base64
 
 #image_path="acne.jpg"
 
-def encode_image(image_path):   
-    image_file=open(image_path, "rb")
-    return base64.b64encode(image_file.read()).decode('utf-8')
+def encode_image(image_path):
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode("utf-8")
 
 #Step3: Setup Multimodal LLM 
 from groq import Groq
@@ -19,7 +19,7 @@ query="Is there something wrong with my face?"
 model = "meta-llama/llama-4-scout-17b-16e-instruct"
 #model="llama-3.2-90b-vision-preview" #Deprecated
 
-def analyze_image_with_query(query, model, encoded_image=None):#here encoded_image=None because i just dont want to make in mandatory as i can audio input also
+def analyze_image_with_query(query, model, encoded_image=None, image_media_type="image/jpeg"):#here encoded_image=None because i just dont want to make in mandatory as i can audio input also
     client = Groq()
     
     messages = [
@@ -36,7 +36,7 @@ def analyze_image_with_query(query, model, encoded_image=None):#here encoded_ima
         messages[0]["content"].append({
             "type": "image_url",
             "image_url": {
-                "url": f"data:image/jpeg;base64,{encoded_image}",
+                "url": f"data:{image_media_type};base64,{encoded_image}",
             }
         })
 

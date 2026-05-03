@@ -12,6 +12,10 @@ from pydub import AudioSegment
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
 
 
+def _server_playback_enabled():
+    return os.environ.get("AI_DOCTOR_SERVER_PLAY_AUDIO", "0").lower() in ("1", "true", "yes")
+
+
 def ensure_folder_exists(filepath):
     """Ensure the directory for the output file exists."""
     folder = os.path.dirname(filepath)
@@ -41,7 +45,8 @@ def text_to_speech_with_gtts(input_text, output_filepath):
     ensure_folder_exists(output_filepath)
     tts = gTTS(text=input_text, lang="en", slow=False)
     tts.save(output_filepath)
-    play_audio(output_filepath)
+    if _server_playback_enabled():
+        play_audio(output_filepath)
 
 
 def text_to_speech_with_elevenlabs(input_text, output_filepath):
@@ -54,4 +59,5 @@ def text_to_speech_with_elevenlabs(input_text, output_filepath):
         model="eleven_turbo_v2"
     )
     save(audio, output_filepath)
-    play_audio(output_filepath)
+    if _server_playback_enabled():
+        play_audio(output_filepath)
