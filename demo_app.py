@@ -11,7 +11,6 @@ from dotenv import load_dotenv
 from brain_of_the_doctor import analyze_image_with_query, encode_image
 from breast_cancer_classifer import breast_cancer_detection_model
 from voice_of_the_doctor import text_to_speech_with_elevenlabs, text_to_speech_with_gtts
-from voice_of_the_patient import transcribe_with_groq
 
 load_dotenv()
 
@@ -27,7 +26,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 MODEL_ID = (os.environ.get("AI_DOCTOR_GROQ_MODEL") or _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
 
-_NO_INPUT_HINT = "Please provide at least an image or audio to begin diagnosis."
+_NO_INPUT_HINT = "Please provide at least an image or a short description to begin diagnosis."
 
 system_prompt = """You have to act as a professional doctor, i know you are not but this is for learning purpose.
 What's in this image?. Do you find anything wrong with it medically?
@@ -81,8 +80,8 @@ def _ensure_demo_example_image() -> Path | None:
         return None
 
 
-def process_inputs(audio_filepath, image_pil, progress: gr.Progress = gr.Progress()):
-    speech_text = ""
+def process_inputs(description, image_pil, progress: gr.Progress = gr.Progress()):
+    context_text = (description or "").strip()
     diagnosis = ""
     route_mode = "—"
     audio_output_path = "static/final.mp3"
@@ -92,13 +91,6 @@ def process_inputs(audio_filepath, image_pil, progress: gr.Progress = gr.Progres
         Path("static").mkdir(parents=True, exist_ok=True)
 
         progress(0.05, desc="Preparing…")
-        if audio_filepath:
-            progress(0.15, desc="Transcribing speech…")
-            speech_text = transcribe_with_groq(
-                GROQ_API_KEY=os.environ.get("GROQ_API_KEY"),
-                audio_filepath=audio_filepath,
-                stt_model="whisper-large-v3",
-            )
 
         image_filepath = None
         encoded_image = None
@@ -108,7 +100,7 @@ def process_inputs(audio_filepath, image_pil, progress: gr.Progress = gr.Progres
             image_pil.save(image_filepath)
             encoded_image = encode_image(image_filepath)
 
-        wants_classifier = contains_hsi_keywords(speech_text) or (
+        wants_classifier = contains_hsi_keywords(context_text) or (
             image_filepath and is_hsi_image(image_filepath)
         )
 
@@ -125,11 +117,11 @@ def process_inputs(audio_filepath, image_pil, progress: gr.Progress = gr.Progres
                 route_mode = "Tissue classifier (demo)"
                 diagnosis = breast_cancer_detection_model(image_filepath)
 
-        elif encoded_image and speech_text:
+        elif encoded_image and context_text:
             progress(0.5, desc="Vision + language model…")
             route_mode = "Vision + language model (Groq)"
             diagnosis = analyze_image_with_query(
-                query=system_prompt + " " + speech_text,
+                query=system_prompt + " " + context_text,
                 encoded_image=encoded_image,
                 model=MODEL_ID,
                 image_media_type="image/png",
@@ -143,11 +135,11 @@ def process_inputs(audio_filepath, image_pil, progress: gr.Progress = gr.Progres
                 model=MODEL_ID,
                 image_media_type="image/png",
             )
-        elif speech_text:
+        elif context_text:
             progress(0.5, desc="Language model…")
             route_mode = "Language model — text only (Groq)"
             diagnosis = analyze_image_with_query(
-                query=system_prompt + " " + speech_text,
+                query=system_prompt + " " + context_text,
                 encoded_image=None,
                 model=MODEL_ID,
             )
@@ -175,14 +167,13 @@ def process_inputs(audio_filepath, image_pil, progress: gr.Progress = gr.Progres
     audio_path = audio_output_path if os.path.exists(audio_output_path) else None
     download_val = audio_path if audio_path else None
 
-    return speech_text, diagnosis, audio_path, download_val, route_mode
+    return diagnosis, audio_path, download_val, route_mode
 
 
 def clear_all():
     return (
-        None,
-        None,
         gr.update(value=""),
+        None,
         gr.update(value=""),
         gr.update(value=None),
         gr.update(value=None),
@@ -739,7 +730,7 @@ def create_interface():
     demo_img = _ensure_demo_example_image()
     sample_rows = []
     if demo_img is not None:
-        sample_rows.append([None, str(demo_img)])
+        sample_rows.append(["", str(demo_img)])
 
     with gr.Blocks(
         theme=_app_theme(),
@@ -778,20 +769,20 @@ def create_interface():
         with gr.Row(equal_height=False):
 
             with gr.Column(scale=1, min_width=320):
-                audio_input = gr.Audio(
-                    sources=["microphone"],
-                    type="filepath",
-                    label="Voice — describe your symptoms",
-                    show_label=True,
-                )
-
-                gr.HTML("<div style='height:10px'></div>")
-
                 image_input = gr.Image(
                     type="pil",
                     label="Medical image (PNG / JPG)",
                     show_label=True,
                     height=230,
+                )
+
+                gr.HTML("<div style='height:10px'></div>")
+
+                description_input = gr.Textbox(
+                    label="Describe symptoms or what to look for",
+                    lines=4,
+                    placeholder="Optional: add context for the image (e.g. pain, duration, what you want checked).",
+                    show_label=True,
                 )
 
                 gr.HTML("<div style='height:14px'></div>")
@@ -809,13 +800,6 @@ def create_interface():
                     )
 
             with gr.Column(scale=1, min_width=320):
-                speech_output = gr.Textbox(
-                    label="Transcribed speech",
-                    lines=3,
-                    interactive=False,
-                    placeholder="Your spoken input will appear here after transcription…",
-                )
-
                 diagnosis_output = gr.Textbox(
                     label="Doctor's response",
                     lines=6,
@@ -839,14 +823,14 @@ def create_interface():
             gr.Markdown("""
 ### Pipeline Overview
 
-**Step 1 — Voice (optional)**  
-Record a short audio clip describing your symptoms. We transcribe it using Groq's Whisper large-v3 model.
+**Step 1 — Image (optional)**  
+Upload a PNG or JPG scan or photo. Pixels are encoded and sent to the vision-language model.
 
-**Step 2 — Image (optional)**  
-Upload a PNG or JPG scan / photo. Pixels are encoded and sent to the vision-language model alongside your spoken context.
+**Step 2 — Description (optional)**  
+Type a short note with symptoms, context, or what you want assessed. It is combined with the image when both are present.
 
 **Step 3 — Routing**  
-Certain keywords (*hyperspectral, tissue, hsi*) route your request to a local Keras tissue classifier instead of the LLM.
+Certain keywords (*hyperspectral, tissue, hsi*) in your text route the request to a local Keras tissue classifier instead of the LLM.
 
 **Step 4 — Voice synthesis**  
 The written response is synthesized to MP3 via gTTS or ElevenLabs for playback and download.
@@ -856,7 +840,7 @@ The written response is synthesized to MP3 via gTTS or ElevenLabs for playback a
             gr.HTML("<div style='height:4px'></div>")
             gr.Examples(
                 examples=sample_rows,
-                inputs=[audio_input, image_input],
+                inputs=[description_input, image_input],
                 label="Try a sample image",
                 cache_examples=False,
             )
@@ -864,14 +848,21 @@ The written response is synthesized to MP3 via gTTS or ElevenLabs for playback a
         # ── Wire up events ────────────────────────────────────────────────────
         analyze_btn.click(
             fn=process_inputs,
-            inputs=[audio_input, image_input],
-            outputs=[speech_output, diagnosis_output, audio_output, download_file, mode_badge],
+            inputs=[description_input, image_input],
+            outputs=[diagnosis_output, audio_output, download_file, mode_badge],
         )
 
         clear_btn.click(
             fn=clear_all,
             inputs=[],
-            outputs=[audio_input, image_input, speech_output, diagnosis_output, audio_output, download_file, mode_badge],
+            outputs=[
+                description_input,
+                image_input,
+                diagnosis_output,
+                audio_output,
+                download_file,
+                mode_badge,
+            ],
         )
 
     return iface
